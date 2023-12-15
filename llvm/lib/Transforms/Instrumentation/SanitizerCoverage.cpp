@@ -1036,13 +1036,20 @@ void ModuleSanitizerCoverage::InjectCoverageAtBlock(Function &F, BasicBlock &BB,
     int flags = 0;
     if(IsEntryBB)
       flags = flags | TAG_HEADER;
-    // for(int i=0; i < ipt_table->size; i++){
-    //   if(!strcmp(func_name, ipt_table->func[i])){
-    //     flags = flags | TAG_IP;
-    //     }
-    // }
-    IRB.CreateCall(SanCovTracePC, ConstantInt::get(Int32Ty, flags))
-        ->setCannotMerge(); // gets the PC using GET_CALLER_PC.
+    for (auto &Inst : BB){
+      // BasicBlock::iterator IP2 = BB->getFirstInsertionPt();
+      auto debug = Inst.getDebugLoc();
+      if(debug){
+        unsigned line = debug.getLine();
+        StringRef filename = debug.get()->getFilename();
+        StringRef directory = debug.get()->getDirectory();
+        errs() << directory << "/" << filename << ":" << line << "\n";
+      }
+      else
+        errs() << "No debug information available for this instruction.\n";
+    }
+    IRB.CreateCall(SanCovTracePC)
+      ->setCannotMerge(); // gets the PC using GET_CALLER_PC.
   }
   if (Options.TracePCGuard) {
     auto GuardPtr = IRB.CreateIntToPtr(
