@@ -1,3 +1,4 @@
+
 //===-- SanitizerCoverage.cpp - coverage instrumentation for sanitizers ---===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -207,7 +208,10 @@ public:
       const SpecialCaseList *Allowlist = nullptr,
       const SpecialCaseList *Blocklist = nullptr)
       : Options(OverrideFromCL(Options)), Allowlist(Allowlist),
-        Blocklist(Blocklist) {}
+        Blocklist(Blocklist) {
+          InitIP();
+        }
+  bool InitIP();
   bool instrumentModule(Module &M, DomTreeCallback DTCallback,
                         PostDomTreeCallback PDTCallback);
 
@@ -473,7 +477,7 @@ bool ModuleSanitizerCoverage::instrumentModule(
   if (Options.StackDepth && !SanCovLowestStack->isDeclaration())
     SanCovLowestStack->setInitializer(Constant::getAllOnesValue(IntptrTy));
 
-  SanCovTracePC = M.getOrInsertFunction(SanCovTracePCName, VoidTy);
+  SanCovTracePC = M.getOrInsertFunction(SanCovTracePCName, VoidTy, Int32PtrTy);
   SanCovTracePCGuard =
       M.getOrInsertFunction(SanCovTracePCGuardName, VoidTy, Int32PtrTy);
 
@@ -759,7 +763,8 @@ void ModuleSanitizerCoverage::CreateFunctionLocalArrays(
 bool ModuleSanitizerCoverage::InjectCoverage(Function &F,
                                              ArrayRef<BasicBlock *> AllBlocks,
                                              bool IsLeafFunc) {
-  if (AllBlocks.empty()) return false;
+  if (AllBlocks.empty())
+    return false;
   CreateFunctionLocalArrays(F, AllBlocks);
   for (size_t i = 0, N = AllBlocks.size(); i < N; i++)
     InjectCoverageAtBlock(F, *AllBlocks[i], i, IsLeafFunc);
@@ -929,11 +934,91 @@ void ModuleSanitizerCoverage::InjectTraceForCmp(
   }
 }
 
+#define MAX 0x1000
+#define ONCE 0x10
+
+struct LineInfo{
+  char stat; // only A, M, D
+  char *path;
+  int number;
+};
+
+struct InterestingPoint
+{
+  int capacity;
+  int size;
+  LineInfo line[];
+};
+
+InterestingPoint *ipEntry = NULL;
+
+bool ModuleSanitizerCoverage::InitIP()
+{
+  char *ipFile = getenv("IPS");
+  if (ipFile != NULL)
+  {
+    ipEntry = (InterestingPoint *)malloc(sizeof(InterestingPoint) + ONCE * sizeof(LineInfo));
+    ipEntry->size = 0;
+    ipEntry->capacity = ONCE;
+    FILE *fp = fopen(ipFile, "r");
+
+    if (fp == NULL) {
+      fprintf(stderr, "Cannot open $IPS=%s.\n", ipFile);
+      assert (false);
+    }
+
+    char stat = '\0';
+    char path[0x100]; // default set MAX_PATH to 0x100
+    int number = 0;
+    while (true)
+    {
+      stat = '\0';
+      number = 0;
+      memset(path, 0, sizeof(path));
+      int res = fscanf(fp, "%c:%255[^:]:%d\n", &stat, path, &number);
+      if (res != 3 ){
+        fprintf(stderr, "read ip file failed!\n");
+        break;
+      }
+
+      if (ipEntry->size == ipEntry->capacity) {
+        ipEntry->capacity += ONCE;
+        if(ipEntry->capacity > MAX){
+          break;
+        }
+        ipEntry = (InterestingPoint *)realloc(ipEntry, sizeof(InterestingPoint)+(ipEntry->capacity)*sizeof(LineInfo));
+      }
+      ipEntry->line[ipEntry->size].stat = stat;
+      ipEntry->line[ipEntry->size].path= strdup(path);
+      ipEntry->line[ipEntry->size].number = number;
+      ipEntry->size++;
+    }
+
+    fclose(fp);
+  }
+  else{
+    fprintf(stderr, "Environment variables $IPS not set.\n");
+    ipEntry = (InterestingPoint*)malloc(sizeof(InterestingPoint));
+    ipEntry->size = 0 ;
+    ipEntry->capacity = 0;
+    assert (false);
+  }
+  return true;
+}
+
+#define TAG_NORMAL 0xffffffff
+#define TAG_RETURN 0x0
+#define TAG_HEADER 0x1
+#define TAG_IP 0x2
+
+
 void ModuleSanitizerCoverage::InjectCoverageAtBlock(Function &F, BasicBlock &BB,
                                                     size_t Idx,
                                                     bool IsLeafFunc) {
   BasicBlock::iterator IP = BB.getFirstInsertionPt();
   bool IsEntryBB = &BB == &F.getEntryBlock();
+  // const char *func_name = F.getName().data();
+
   DebugLoc EntryLoc;
   if (IsEntryBB) {
     if (auto SP = F.getSubprogram())
@@ -948,7 +1033,15 @@ void ModuleSanitizerCoverage::InjectCoverageAtBlock(Function &F, BasicBlock &BB,
   if (EntryLoc)
     IRB.SetCurrentDebugLocation(EntryLoc);
   if (Options.TracePC) {
-    IRB.CreateCall(SanCovTracePC)
+    int flags = 0;
+    if(IsEntryBB)
+      flags = flags | TAG_HEADER;
+    // for(int i=0; i < ipt_table->size; i++){
+    //   if(!strcmp(func_name, ipt_table->func[i])){
+    //     flags = flags | TAG_IP;
+    //     }
+    // }
+    IRB.CreateCall(SanCovTracePC, ConstantInt::get(Int32Ty, flags))
         ->setCannotMerge(); // gets the PC using GET_CALLER_PC.
   }
   if (Options.TracePCGuard) {
