@@ -477,7 +477,7 @@ bool ModuleSanitizerCoverage::instrumentModule(
   if (Options.StackDepth && !SanCovLowestStack->isDeclaration())
     SanCovLowestStack->setInitializer(Constant::getAllOnesValue(IntptrTy));
 
-  SanCovTracePC = M.getOrInsertFunction(SanCovTracePCName, VoidTy, Int32PtrTy);
+  SanCovTracePC = M.getOrInsertFunction(SanCovTracePCName, VoidTy);
   SanCovTracePCGuard =
       M.getOrInsertFunction(SanCovTracePCGuardName, VoidTy, Int32PtrTy);
 
@@ -950,19 +950,19 @@ struct InterestingPoint
   LineInfo line[];
 };
 
-InterestingPoint *ipEntry = NULL;
+InterestingPoint *ipEntry = nullptr;
 
 bool ModuleSanitizerCoverage::InitIP()
 {
   char *ipFile = getenv("IPS");
-  if (ipFile != NULL)
+  if (ipFile != nullptr)
   {
     ipEntry = (InterestingPoint *)malloc(sizeof(InterestingPoint) + ONCE * sizeof(LineInfo));
     ipEntry->size = 0;
     ipEntry->capacity = ONCE;
     FILE *fp = fopen(ipFile, "r");
 
-    if (fp == NULL) {
+    if (fp == nullptr) {
       fprintf(stderr, "Cannot open $IPS=%s.\n", ipFile);
       assert (false);
     }
@@ -1037,7 +1037,6 @@ void ModuleSanitizerCoverage::InjectCoverageAtBlock(Function &F, BasicBlock &BB,
     if(IsEntryBB)
       flags = flags | TAG_HEADER;
     for (auto &Inst : BB){
-      // BasicBlock::iterator IP2 = BB->getFirstInsertionPt();
       auto debug = Inst.getDebugLoc();
       if(debug){
         unsigned line = debug.getLine();
@@ -1045,8 +1044,6 @@ void ModuleSanitizerCoverage::InjectCoverageAtBlock(Function &F, BasicBlock &BB,
         StringRef directory = debug.get()->getDirectory();
         errs() << directory << "/" << filename << ":" << line << "\n";
       }
-      else
-        errs() << "No debug information available for this instruction.\n";
     }
     IRB.CreateCall(SanCovTracePC)
       ->setCannotMerge(); // gets the PC using GET_CALLER_PC.
