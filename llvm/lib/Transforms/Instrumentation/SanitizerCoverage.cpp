@@ -201,6 +201,22 @@ using DomTreeCallback = function_ref<const DominatorTree *(Function &F)>;
 using PostDomTreeCallback =
     function_ref<const PostDominatorTree *(Function &F)>;
 
+#define MAX 0x1000
+#define ONCE 0x10
+
+struct LineInfo{
+  char stat; // only A, M, D
+  char *path;
+  int number;
+};
+
+struct InterestingPoint
+{
+  int capacity;
+  int size;
+  LineInfo line[];
+};
+
 class ModuleSanitizerCoverage {
 public:
   ModuleSanitizerCoverage(
@@ -237,7 +253,7 @@ private:
   GlobalVariable *CreatePCArray(Function &F, ArrayRef<BasicBlock *> AllBlocks);
   void CreateFunctionLocalArrays(Function &F, ArrayRef<BasicBlock *> AllBlocks);
   void InjectCoverageAtBlock(Function &F, BasicBlock &BB, size_t Idx,
-                             bool IsLeafFunc = true);
+                             bool IsLeafFunc = true, bool IsInterestingPoint = false);
   Function *CreateInitCallsForSections(Module &M, const char *CtorName,
                                        const char *InitFunctionName, Type *Ty,
                                        const char *Section);
@@ -247,7 +263,7 @@ private:
   void SetNoSanitizeMetadata(Instruction *I) {
     I->setMetadata(LLVMContext::MD_nosanitize, MDNode::get(*C, None));
   }
-
+  InterestingPoint *ipEntry = nullptr;
   std::string getSectionName(const std::string &Section) const;
   std::string getSectionStart(const std::string &Section) const;
   std::string getSectionEnd(const std::string &Section) const;
@@ -477,7 +493,8 @@ bool ModuleSanitizerCoverage::instrumentModule(
   if (Options.StackDepth && !SanCovLowestStack->isDeclaration())
     SanCovLowestStack->setInitializer(Constant::getAllOnesValue(IntptrTy));
 
-  SanCovTracePC = M.getOrInsertFunction(SanCovTracePCName, VoidTy);
+  SanCovTracePC =
+      M.getOrInsertFunction(SanCovTracePCName, VoidTy, Int32Ty);
   SanCovTracePCGuard =
       M.getOrInsertFunction(SanCovTracePCGuardName, VoidTy, Int32PtrTy);
 
@@ -763,11 +780,19 @@ void ModuleSanitizerCoverage::CreateFunctionLocalArrays(
 bool ModuleSanitizerCoverage::InjectCoverage(Function &F,
                                              ArrayRef<BasicBlock *> AllBlocks,
                                              bool IsLeafFunc) {
-  if (AllBlocks.empty())
-    return false;
+  if (AllBlocks.empty()) return false;
+  if (DISubprogram *SP = F.getSubprogram()) {
+    std::string FilePath, FileName;
+    FileName = SP->getFilename().str();
+    FilePath = SP->getDirectory().str();
+    errs() << FilePath << "/" << FileName << "\n";
+  }
+  for(int i=0; i<ipEntry->size; i++) {
+    errs() << ipEntry->line[i].path << "\n";
+  }
   CreateFunctionLocalArrays(F, AllBlocks);
   for (size_t i = 0, N = AllBlocks.size(); i < N; i++)
-    InjectCoverageAtBlock(F, *AllBlocks[i], i, IsLeafFunc);
+    InjectCoverageAtBlock(F, *AllBlocks[i], i, IsLeafFunc, false);
   return true;
 }
 
@@ -934,24 +959,6 @@ void ModuleSanitizerCoverage::InjectTraceForCmp(
   }
 }
 
-#define MAX 0x1000
-#define ONCE 0x10
-
-struct LineInfo{
-  char stat; // only A, M, D
-  char *path;
-  int number;
-};
-
-struct InterestingPoint
-{
-  int capacity;
-  int size;
-  LineInfo line[];
-};
-
-InterestingPoint *ipEntry = nullptr;
-
 bool ModuleSanitizerCoverage::InitIP()
 {
   char *ipFile = getenv("IPS");
@@ -970,17 +977,21 @@ bool ModuleSanitizerCoverage::InitIP()
     char stat = '\0';
     char path[0x100]; // default set MAX_PATH to 0x100
     int number = 0;
+    int i=0;
     while (true)
     {
       stat = '\0';
       number = 0;
       memset(path, 0, sizeof(path));
-      int res = fscanf(fp, "%c:%255[^:]:%d\n", &stat, path, &number);
-      if (res != 3 ){
-        fprintf(stderr, "read ip file failed!\n");
+      if (feof(fp)){
         break;
       }
-
+      int res = fscanf(fp, "%c:%255[^:]:%d\n", &stat, path, &number);
+      if (res != 3 ){
+        fprintf(stderr, "read ip line%d failed!\n", i);
+        break;
+      }
+      i++;
       if (ipEntry->size == ipEntry->capacity) {
         ipEntry->capacity += ONCE;
         if(ipEntry->capacity > MAX){
@@ -1006,18 +1017,18 @@ bool ModuleSanitizerCoverage::InitIP()
   return true;
 }
 
+// TODO: design mistakes need to rebuild
 #define TAG_NORMAL 0xffffffff
 #define TAG_RETURN 0x0
 #define TAG_HEADER 0x1
 #define TAG_IP 0x2
 
-
 void ModuleSanitizerCoverage::InjectCoverageAtBlock(Function &F, BasicBlock &BB,
                                                     size_t Idx,
-                                                    bool IsLeafFunc) {
+                                                    bool IsLeafFunc,
+                                                    bool IsInterestingPoint) {
   BasicBlock::iterator IP = BB.getFirstInsertionPt();
   bool IsEntryBB = &BB == &F.getEntryBlock();
-  // const char *func_name = F.getName().data();
 
   DebugLoc EntryLoc;
   if (IsEntryBB) {
@@ -1030,22 +1041,24 @@ void ModuleSanitizerCoverage::InjectCoverageAtBlock(Function &F, BasicBlock &BB,
   }
 
   InstrumentationIRBuilder IRB(&*IP);
+
   if (EntryLoc)
     IRB.SetCurrentDebugLocation(EntryLoc);
   if (Options.TracePC) {
-    int flags = 0;
+    int flag = 0;
     if(IsEntryBB)
-      flags = flags | TAG_HEADER;
-    for (auto &Inst : BB){
-      auto debug = Inst.getDebugLoc();
-      if(debug){
-        unsigned line = debug.getLine();
-        StringRef filename = debug.get()->getFilename();
-        StringRef directory = debug.get()->getDirectory();
-        errs() << directory << "/" << filename << ":" << line << "\n";
+      flag = flag | TAG_HEADER;
+    if(IsInterestingPoint){
+      for (auto &Inst : BB){
+        auto debug = Inst.getDebugLoc();
+        if(debug){
+          unsigned line = debug.getLine();
+          errs() << line << "\n";
+        }
+        flag = flag | TAG_IP;
       }
     }
-    IRB.CreateCall(SanCovTracePC)
+    IRB.CreateCall(SanCovTracePC, ConstantInt::get(Int32Ty, flag))
       ->setCannotMerge(); // gets the PC using GET_CALLER_PC.
   }
   if (Options.TracePCGuard) {
