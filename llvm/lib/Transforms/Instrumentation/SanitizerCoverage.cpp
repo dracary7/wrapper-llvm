@@ -228,6 +228,7 @@ public:
           InitIP();
         }
   bool InitIP();
+  void GetLinesFromPath(const char *targetPath, int ipLines[]);
   bool instrumentModule(Module &M, DomTreeCallback DTCallback,
                         PostDomTreeCallback PDTCallback);
 
@@ -253,7 +254,7 @@ private:
   GlobalVariable *CreatePCArray(Function &F, ArrayRef<BasicBlock *> AllBlocks);
   void CreateFunctionLocalArrays(Function &F, ArrayRef<BasicBlock *> AllBlocks);
   void InjectCoverageAtBlock(Function &F, BasicBlock &BB, size_t Idx,
-                             bool IsLeafFunc = true, bool IsInterestingPoint = false);
+                             bool IsLeafFunc = true, bool IsInterestingBlock = false);
   Function *CreateInitCallsForSections(Module &M, const char *CtorName,
                                        const char *InitFunctionName, Type *Ty,
                                        const char *Section);
@@ -777,22 +778,33 @@ void ModuleSanitizerCoverage::CreateFunctionLocalArrays(
     FunctionPCsArray = CreatePCArray(F, AllBlocks);
 }
 
+
 bool ModuleSanitizerCoverage::InjectCoverage(Function &F,
                                              ArrayRef<BasicBlock *> AllBlocks,
                                              bool IsLeafFunc) {
   if (AllBlocks.empty()) return false;
+
+  bool IsInterestingBlock = false;
+  std::string FullPath;
+
   if (DISubprogram *SP = F.getSubprogram()) {
     std::string FilePath, FileName;
-    FileName = SP->getFilename().str();
     FilePath = SP->getDirectory().str();
-    errs() << FilePath << "/" << FileName << "\n";
+    FileName = SP->getFilename().str();
+    FullPath = FilePath+"/"+FileName;
   }
-  for(int i=0; i<ipEntry->size; i++) {
-    errs() << ipEntry->line[i].path << "\n";
+  if(!FullPath.empty()){
+    for(int i=0; i<ipEntry->size; i++) {
+      if(!strcmp(ipEntry->line[i].path, FullPath.c_str())){
+        IsInterestingBlock = true;
+        break;
+      }
+    }
   }
+
   CreateFunctionLocalArrays(F, AllBlocks);
   for (size_t i = 0, N = AllBlocks.size(); i < N; i++)
-    InjectCoverageAtBlock(F, *AllBlocks[i], i, IsLeafFunc, false);
+    InjectCoverageAtBlock(F, *AllBlocks[i], i, IsLeafFunc, IsInterestingBlock);
   return true;
 }
 
@@ -1026,7 +1038,7 @@ bool ModuleSanitizerCoverage::InitIP()
 void ModuleSanitizerCoverage::InjectCoverageAtBlock(Function &F, BasicBlock &BB,
                                                     size_t Idx,
                                                     bool IsLeafFunc,
-                                                    bool IsInterestingPoint) {
+                                                    bool IsInterestingBlock) {
   BasicBlock::iterator IP = BB.getFirstInsertionPt();
   bool IsEntryBB = &BB == &F.getEntryBlock();
 
@@ -1048,16 +1060,29 @@ void ModuleSanitizerCoverage::InjectCoverageAtBlock(Function &F, BasicBlock &BB,
     int flag = 0;
     if(IsEntryBB)
       flag = flag | TAG_HEADER;
-    if(IsInterestingPoint){
+    if(IsInterestingBlock){
       for (auto &Inst : BB){
         auto debug = Inst.getDebugLoc();
         if(debug){
-          unsigned line = debug.getLine();
-          errs() << line << "\n";
+          auto *scope = cast<llvm::DIScope>(debug.getScope());
+          std::string filepath = scope->getDirectory().str();
+          std::string filename = scope->getFilename().str();
+          std::string number = std::to_string(debug.getLine());
+          std::string full = filepath+"/"+filename+":"+number;
+          char buffer[0x200];
+          memset(buffer, 0, sizeof(buffer));
+          for(int i=0;i<ipEntry->size;i++){
+            sprintf(buffer, "%s:%d\0", ipEntry->line[i].path,ipEntry->line[i].number);
+            if(!strcmp(buffer, full.c_str())){
+              flag = flag | TAG_IP;
+              goto fuck;
+            }
+          }
+          // errs() << full << "\n";
         }
-        flag = flag | TAG_IP;
       }
     }
+fuck:
     IRB.CreateCall(SanCovTracePC, ConstantInt::get(Int32Ty, flag))
       ->setCannotMerge(); // gets the PC using GET_CALLER_PC.
   }
