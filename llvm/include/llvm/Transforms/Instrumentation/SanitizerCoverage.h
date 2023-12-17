@@ -19,6 +19,7 @@
 #include "llvm/Support/SpecialCaseList.h"
 #include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Transforms/Instrumentation.h"
+#include "llvm/ADT/StringMap.h"
 
 namespace llvm {
 class Module;
@@ -32,6 +33,8 @@ class ModuleSanitizerCoveragePass
 public:
   explicit ModuleSanitizerCoveragePass(
       SanitizerCoverageOptions Options = SanitizerCoverageOptions(),
+      const llvm::StringMap<std::vector<int>> &IntestringPoint =
+          llvm::StringMap<std::vector<int>>(),
       const std::vector<std::string> &AllowlistFiles =
           std::vector<std::string>(),
       const std::vector<std::string> &BlocklistFiles =

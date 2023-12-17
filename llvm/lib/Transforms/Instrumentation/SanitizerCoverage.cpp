@@ -201,22 +201,6 @@ using DomTreeCallback = function_ref<const DominatorTree *(Function &F)>;
 using PostDomTreeCallback =
     function_ref<const PostDominatorTree *(Function &F)>;
 
-#define MAX 0x1000
-#define ONCE 0x10
-
-struct LineInfo{
-  char stat; // only A, M, D
-  char *path;
-  int number;
-};
-
-struct InterestingPoint
-{
-  int capacity;
-  int size;
-  LineInfo line[];
-};
-
 class ModuleSanitizerCoverage {
 public:
   ModuleSanitizerCoverage(
@@ -224,11 +208,7 @@ public:
       const SpecialCaseList *Allowlist = nullptr,
       const SpecialCaseList *Blocklist = nullptr)
       : Options(OverrideFromCL(Options)), Allowlist(Allowlist),
-        Blocklist(Blocklist) {
-          InitIP();
-        }
-  bool InitIP();
-  void GetLinesFromPath(const char *targetPath, int ipLines[]);
+        Blocklist(Blocklist) {}
   bool instrumentModule(Module &M, DomTreeCallback DTCallback,
                         PostDomTreeCallback PDTCallback);
 
@@ -264,7 +244,7 @@ private:
   void SetNoSanitizeMetadata(Instruction *I) {
     I->setMetadata(LLVMContext::MD_nosanitize, MDNode::get(*C, None));
   }
-  InterestingPoint *ipEntry = nullptr;
+  // InterestingPoint *ipEntry = nullptr;
   std::string getSectionName(const std::string &Section) const;
   std::string getSectionStart(const std::string &Section) const;
   std::string getSectionEnd(const std::string &Section) const;
@@ -312,6 +292,7 @@ PreservedAnalyses ModuleSanitizerCoveragePass::run(Module &M,
   auto PDTCallback = [&FAM](Function &F) -> const PostDominatorTree * {
     return &FAM.getResult<PostDominatorTreeAnalysis>(F);
   };
+
   if (ModuleSancov.instrumentModule(M, DTCallback, PDTCallback))
     return PreservedAnalyses::none();
   return PreservedAnalyses::all();
@@ -785,22 +766,22 @@ bool ModuleSanitizerCoverage::InjectCoverage(Function &F,
   if (AllBlocks.empty()) return false;
 
   bool IsInterestingBlock = false;
-  std::string FullPath;
+  // std::string FullPath;
 
-  if (DISubprogram *SP = F.getSubprogram()) {
-    std::string FilePath, FileName;
-    FilePath = SP->getDirectory().str();
-    FileName = SP->getFilename().str();
-    FullPath = FilePath+"/"+FileName;
-  }
-  if(!FullPath.empty()){
-    for(int i=0; i<ipEntry->size; i++) {
-      if(!strcmp(ipEntry->line[i].path, FullPath.c_str())){
-        IsInterestingBlock = true;
-        break;
-      }
-    }
-  }
+  // if (DISubprogram *SP = F.getSubprogram()) {
+  //   std::string FilePath, FileName;
+  //   FilePath = SP->getDirectory().str();
+  //   FileName = SP->getFilename().str();
+  //   FullPath = FilePath+"/"+FileName;
+  // }
+  // if(!FullPath.empty()){
+  //   for(int i=0; i<ipEntry->size; i++) {
+  //     if(!strcmp(ipEntry->line[i].path, FullPath.c_str())){
+  //       IsInterestingBlock = true;
+  //       break;
+  //     }
+  //   }
+  // }
 
   CreateFunctionLocalArrays(F, AllBlocks);
   for (size_t i = 0, N = AllBlocks.size(); i < N; i++)
@@ -971,64 +952,6 @@ void ModuleSanitizerCoverage::InjectTraceForCmp(
   }
 }
 
-bool ModuleSanitizerCoverage::InitIP()
-{
-  char *ipFile = getenv("IPS");
-  if (ipFile != nullptr)
-  {
-    ipEntry = (InterestingPoint *)malloc(sizeof(InterestingPoint) + ONCE * sizeof(LineInfo));
-    ipEntry->size = 0;
-    ipEntry->capacity = ONCE;
-    FILE *fp = fopen(ipFile, "r");
-
-    if (fp == nullptr) {
-      fprintf(stderr, "Cannot open $IPS=%s.\n", ipFile);
-      assert (false);
-    }
-
-    char stat = '\0';
-    char path[0x100]; // default set MAX_PATH to 0x100
-    int number = 0;
-    int i=0;
-    while (true)
-    {
-      stat = '\0';
-      number = 0;
-      memset(path, 0, sizeof(path));
-      if (feof(fp)){
-        break;
-      }
-      int res = fscanf(fp, "%c:%255[^:]:%d\n", &stat, path, &number);
-      if (res != 3 ){
-        fprintf(stderr, "read ip line%d failed!\n", i);
-        break;
-      }
-      i++;
-      if (ipEntry->size == ipEntry->capacity) {
-        ipEntry->capacity += ONCE;
-        if(ipEntry->capacity > MAX){
-          break;
-        }
-        ipEntry = (InterestingPoint *)realloc(ipEntry, sizeof(InterestingPoint)+(ipEntry->capacity)*sizeof(LineInfo));
-      }
-      ipEntry->line[ipEntry->size].stat = stat;
-      ipEntry->line[ipEntry->size].path= strdup(path);
-      ipEntry->line[ipEntry->size].number = number;
-      ipEntry->size++;
-    }
-
-    fclose(fp);
-  }
-  else{
-    fprintf(stderr, "Environment variables $IPS not set.\n");
-    ipEntry = (InterestingPoint*)malloc(sizeof(InterestingPoint));
-    ipEntry->size = 0 ;
-    ipEntry->capacity = 0;
-    assert (false);
-  }
-  return true;
-}
-
 // TODO: design mistakes need to rebuild
 #define TAG_NORMAL 0xffffffff
 #define TAG_RETURN 0x0
@@ -1060,28 +983,28 @@ void ModuleSanitizerCoverage::InjectCoverageAtBlock(Function &F, BasicBlock &BB,
     int flag = 0;
     if(IsEntryBB)
       flag = flag | TAG_HEADER;
-    if(IsInterestingBlock){
-      for (auto &Inst : BB){
-        auto debug = Inst.getDebugLoc();
-        if(debug){
-          auto *scope = cast<llvm::DIScope>(debug.getScope());
-          std::string filepath = scope->getDirectory().str();
-          std::string filename = scope->getFilename().str();
-          std::string number = std::to_string(debug.getLine());
-          std::string full = filepath+"/"+filename+":"+number;
-          char buffer[0x200];
-          memset(buffer, 0, sizeof(buffer));
-          for(int i=0;i<ipEntry->size;i++){
-            sprintf(buffer, "%s:%d\0", ipEntry->line[i].path,ipEntry->line[i].number);
-            if(!strcmp(buffer, full.c_str())){
-              flag = flag | TAG_IP;
-              goto fuck;
-            }
-          }
-          // errs() << full << "\n";
-        }
-      }
-    }
+    // if(IsInterestingBlock){
+    //   for (auto &Inst : BB){
+    //     auto debug = Inst.getDebugLoc();
+    //     if(debug){
+    //       auto *scope = cast<llvm::DIScope>(debug.getScope());
+    //       std::string filepath = scope->getDirectory().str();
+    //       std::string filename = scope->getFilename().str();
+    //       std::string number = std::to_string(debug.getLine());
+    //       std::string full = filepath+"/"+filename+":"+number;
+    //       char buffer[0x200];
+    //       memset(buffer, 0, sizeof(buffer));
+    //       for(int i=0;i<ipEntry->size;i++){
+    //         sprintf(buffer, "%s:%d\0", ipEntry->line[i].path,ipEntry->line[i].number);
+    //         if(!strcmp(buffer, full.c_str())){
+    //           flag = flag | TAG_IP;
+    //           goto fuck;
+    //         }
+    //       }
+    //       // errs() << full << "\n";
+    //     }
+    //   }
+    // }
 fuck:
     IRB.CreateCall(SanCovTracePC, ConstantInt::get(Int32Ty, flag))
       ->setCannotMerge(); // gets the PC using GET_CALLER_PC.

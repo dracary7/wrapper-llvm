@@ -17,6 +17,7 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/StackSafetyAnalysis.h"
@@ -87,6 +88,8 @@
 #include "llvm/Transforms/Utils/NameAnonGlobals.h"
 #include "llvm/Transforms/Utils/SymbolRewriter.h"
 #include <memory>
+#include <iostream>
+#include <fstream>
 using namespace clang;
 using namespace llvm;
 
@@ -620,16 +623,49 @@ static OptimizationLevel mapToLevel(const CodeGenOptions &Opts) {
   }
 }
 
+bool void readInterestingPoints(llvm::StringMap<std::vector<int>> &ips){
+  const char *ipsFile = std::getenv("IPS_FILE");
+  if (ipsFile != nullptr)
+  {
+    std::ifstream fp(ipsFile);
+    if(!fp.is_open()){
+      errs() << "Failed to open " << ipsFile << "\n";
+      return false;
+    }
+    std::string line;
+    while(std::getline(fp, line)){
+      size_t pos = line.find(":");
+      if(pos! = std::string::npos)
+        ips[line.substr(0, pos)].push_back(std::stoi(line.substr(pos+1)));
+      else
+        return false;
+    }
+    fp.close();
+  }
+  else{
+    return false;
+  }
+  return true;
+}
+
 static void addSanitizers(const Triple &TargetTriple,
                           const CodeGenOptions &CodeGenOpts,
                           const LangOptions &LangOpts, PassBuilder &PB) {
   PB.registerOptimizerLastEPCallback([&](ModulePassManager &MPM,
                                          OptimizationLevel Level) {
     if (CodeGenOpts.hasSanitizeCoverage()) {
-      auto SancovOpts = getSancovOptsFromCGOpts(CodeGenOpts);
-      MPM.addPass(ModuleSanitizerCoveragePass(
-          SancovOpts, CodeGenOpts.SanitizeCoverageAllowlistFiles,
-          CodeGenOpts.SanitizeCoverageIgnorelistFiles));
+      llvm::StringMap<std::vector<int>> InterestingPoints;
+      if(readInterestingPoints(InterestingPoints)){
+        auto SancovOpts = getSancovOptsFromCGOpts(CodeGenOpts);
+        MPM.addPass(ModuleSanitizerCoveragePass(
+            SancovOpts,
+            InterestingPoints,
+            CodeGenOpts.SanitizeCoverageAllowlistFiles,
+            CodeGenOpts.SanitizeCoverageIgnorelistFiles));
+      }
+      else {
+        assert(false);
+      }
     }
 
     auto MSanPass = [&](SanitizerMask Mask, bool CompileKernel) {
