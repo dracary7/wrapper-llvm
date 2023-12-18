@@ -33,13 +33,13 @@ class ModuleSanitizerCoveragePass
 public:
   explicit ModuleSanitizerCoveragePass(
       SanitizerCoverageOptions Options = SanitizerCoverageOptions(),
-      const llvm::StringMap<std::vector<int>> &IntestringPoint =
+      const llvm::StringMap<std::vector<int>> InterestingPoints =
           llvm::StringMap<std::vector<int>>(),
       const std::vector<std::string> &AllowlistFiles =
           std::vector<std::string>(),
       const std::vector<std::string> &BlocklistFiles =
           std::vector<std::string>())
-      : Options(Options) {
+      : Options(Options),InterestingPoints(InterestingPoints) {
     if (AllowlistFiles.size() > 0)
       Allowlist = SpecialCaseList::createOrDie(AllowlistFiles,
                                                *vfs::getRealFileSystem());
@@ -52,6 +52,7 @@ public:
 
 private:
   SanitizerCoverageOptions Options;
+  const llvm::StringMap<std::vector<int>> InterestingPoints;
 
   std::unique_ptr<SpecialCaseList> Allowlist;
   std::unique_ptr<SpecialCaseList> Blocklist;

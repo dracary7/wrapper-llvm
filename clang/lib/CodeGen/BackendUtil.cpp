@@ -623,27 +623,29 @@ static OptimizationLevel mapToLevel(const CodeGenOptions &Opts) {
   }
 }
 
-bool void readInterestingPoints(llvm::StringMap<std::vector<int>> &ips){
+static bool readInterestingPoints(llvm::StringMap<std::vector<int>> &InterestingPoints){
   const char *ipsFile = std::getenv("IPS_FILE");
-  if (ipsFile != nullptr)
-  {
-    std::ifstream fp(ipsFile);
-    if(!fp.is_open()){
-      errs() << "Failed to open " << ipsFile << "\n";
-      return false;
-    }
-    std::string line;
-    while(std::getline(fp, line)){
-      size_t pos = line.find(":");
-      if(pos! = std::string::npos)
-        ips[line.substr(0, pos)].push_back(std::stoi(line.substr(pos+1)));
-      else
-        return false;
-    }
-    fp.close();
-  }
-  else{
+  if(ipsFile == nullptr){
+    errs() << "IPS_FILE environment not set.\n";
     return false;
+  }
+
+  std::ifstream fp(ipsFile);
+  if(!fp.is_open()){
+    errs() << "Failed to open " << ipsFile << "\n";
+    return false;
+  }
+
+  std::string line;
+  while(std::getline(fp, line)){
+    size_t pos = line.find(":");
+    if(pos != std::string::npos){
+      std::string key = line.substr(0, pos);
+      int value = std::stoi(line.substr(pos+1));
+      InterestingPoints[key].push_back(value);
+    }
+    else
+      return false;
   }
   return true;
 }

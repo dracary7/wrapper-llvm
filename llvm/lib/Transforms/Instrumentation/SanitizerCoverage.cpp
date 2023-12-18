@@ -14,6 +14,7 @@
 #include "llvm/Transforms/Instrumentation/SanitizerCoverage.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Analysis/EHPersonalities.h"
 #include "llvm/Analysis/PostDominators.h"
@@ -210,11 +211,13 @@ public:
       : Options(OverrideFromCL(Options)), Allowlist(Allowlist),
         Blocklist(Blocklist) {}
   bool instrumentModule(Module &M, DomTreeCallback DTCallback,
-                        PostDomTreeCallback PDTCallback);
+                        PostDomTreeCallback PDTCallback,
+                        const llvm::StringMap<std::vector<int>> &InterestingPoints);
 
 private:
   void instrumentFunction(Function &F, DomTreeCallback DTCallback,
-                          PostDomTreeCallback PDTCallback);
+                          PostDomTreeCallback PDTCallback,
+                          const std::vector<int> &InterestingLines);
   void InjectCoverageForIndirectCalls(Function &F,
                                       ArrayRef<Instruction *> IndirCalls);
   void InjectTraceForCmp(Function &F, ArrayRef<Instruction *> CmpTraceTargets);
@@ -227,6 +230,7 @@ private:
   void InjectTraceForSwitch(Function &F,
                             ArrayRef<Instruction *> SwitchTraceTargets);
   bool InjectCoverage(Function &F, ArrayRef<BasicBlock *> AllBlocks,
+                      const std::vector<int> InterestingLines,
                       bool IsLeafFunc = true);
   GlobalVariable *CreateFunctionLocalArrayInSection(size_t NumElements,
                                                     Function &F, Type *Ty,
@@ -234,7 +238,8 @@ private:
   GlobalVariable *CreatePCArray(Function &F, ArrayRef<BasicBlock *> AllBlocks);
   void CreateFunctionLocalArrays(Function &F, ArrayRef<BasicBlock *> AllBlocks);
   void InjectCoverageAtBlock(Function &F, BasicBlock &BB, size_t Idx,
-                             bool IsLeafFunc = true, bool IsInterestingBlock = false);
+                             const std::vector<int> InterestingLines,
+                             bool IsLeafFunc = true);
   Function *CreateInitCallsForSections(Module &M, const char *CtorName,
                                        const char *InitFunctionName, Type *Ty,
                                        const char *Section);
@@ -293,7 +298,7 @@ PreservedAnalyses ModuleSanitizerCoveragePass::run(Module &M,
     return &FAM.getResult<PostDominatorTreeAnalysis>(F);
   };
 
-  if (ModuleSancov.instrumentModule(M, DTCallback, PDTCallback))
+  if (ModuleSancov.instrumentModule(M, DTCallback, PDTCallback, InterestingPoints))
     return PreservedAnalyses::none();
   return PreservedAnalyses::all();
 }
@@ -362,7 +367,8 @@ Function *ModuleSanitizerCoverage::CreateInitCallsForSections(
 }
 
 bool ModuleSanitizerCoverage::instrumentModule(
-    Module &M, DomTreeCallback DTCallback, PostDomTreeCallback PDTCallback) {
+    Module &M, DomTreeCallback DTCallback, PostDomTreeCallback PDTCallback,
+    const llvm::StringMap<std::vector<int>> &InterestingPoints) {
   if (Options.CoverageType == SanitizerCoverageOptions::SCK_None)
     return false;
   if (Allowlist &&
@@ -480,8 +486,12 @@ bool ModuleSanitizerCoverage::instrumentModule(
   SanCovTracePCGuard =
       M.getOrInsertFunction(SanCovTracePCGuardName, VoidTy, Int32PtrTy);
 
+  std::string SourceFileName = M.getSourceFileName();
+  std::vector<int> InterestingLines;
+  InterestingLines = InterestingPoints.lookup(SourceFileName);
+
   for (auto &F : M)
-    instrumentFunction(F, DTCallback, PDTCallback);
+    instrumentFunction(F, DTCallback, PDTCallback, InterestingLines);
 
   Function *Ctor = nullptr;
 
@@ -593,7 +603,8 @@ static bool IsInterestingCmp(ICmpInst *CMP, const DominatorTree *DT,
 }
 
 void ModuleSanitizerCoverage::instrumentFunction(
-    Function &F, DomTreeCallback DTCallback, PostDomTreeCallback PDTCallback) {
+    Function &F, DomTreeCallback DTCallback, PostDomTreeCallback PDTCallback,
+    const std::vector<int> &InterestingLines) {
   if (F.empty())
     return;
   if (F.getName().find(".module_ctor") != std::string::npos)
@@ -674,7 +685,7 @@ void ModuleSanitizerCoverage::instrumentFunction(
     }
   }
 
-  InjectCoverage(F, BlocksToInstrument, IsLeafFunc);
+  InjectCoverage(F, BlocksToInstrument, InterestingLines, IsLeafFunc);
   InjectCoverageForIndirectCalls(F, IndirCalls);
   InjectTraceForCmp(F, CmpTraceTargets);
   InjectTraceForSwitch(F, SwitchTraceTargets);
@@ -762,30 +773,13 @@ void ModuleSanitizerCoverage::CreateFunctionLocalArrays(
 
 bool ModuleSanitizerCoverage::InjectCoverage(Function &F,
                                              ArrayRef<BasicBlock *> AllBlocks,
+                                             const std::vector<int> InterestingLines,
                                              bool IsLeafFunc) {
   if (AllBlocks.empty()) return false;
 
-  bool IsInterestingBlock = false;
-  // std::string FullPath;
-
-  // if (DISubprogram *SP = F.getSubprogram()) {
-  //   std::string FilePath, FileName;
-  //   FilePath = SP->getDirectory().str();
-  //   FileName = SP->getFilename().str();
-  //   FullPath = FilePath+"/"+FileName;
-  // }
-  // if(!FullPath.empty()){
-  //   for(int i=0; i<ipEntry->size; i++) {
-  //     if(!strcmp(ipEntry->line[i].path, FullPath.c_str())){
-  //       IsInterestingBlock = true;
-  //       break;
-  //     }
-  //   }
-  // }
-
   CreateFunctionLocalArrays(F, AllBlocks);
   for (size_t i = 0, N = AllBlocks.size(); i < N; i++)
-    InjectCoverageAtBlock(F, *AllBlocks[i], i, IsLeafFunc, IsInterestingBlock);
+    InjectCoverageAtBlock(F, *AllBlocks[i], i, InterestingLines, IsLeafFunc);
   return true;
 }
 
@@ -956,12 +950,12 @@ void ModuleSanitizerCoverage::InjectTraceForCmp(
 #define TAG_NORMAL 0xffffffff
 #define TAG_RETURN 0x0
 #define TAG_HEADER 0x1
-#define TAG_IP 0x2
+#define TAG_INTERESTING 0x2
 
 void ModuleSanitizerCoverage::InjectCoverageAtBlock(Function &F, BasicBlock &BB,
                                                     size_t Idx,
-                                                    bool IsLeafFunc,
-                                                    bool IsInterestingBlock) {
+                                                    const std::vector<int> InterestingLines,
+                                                    bool IsLeafFunc) {
   BasicBlock::iterator IP = BB.getFirstInsertionPt();
   bool IsEntryBB = &BB == &F.getEntryBlock();
 
@@ -983,29 +977,18 @@ void ModuleSanitizerCoverage::InjectCoverageAtBlock(Function &F, BasicBlock &BB,
     int flag = 0;
     if(IsEntryBB)
       flag = flag | TAG_HEADER;
-    // if(IsInterestingBlock){
-    //   for (auto &Inst : BB){
-    //     auto debug = Inst.getDebugLoc();
-    //     if(debug){
-    //       auto *scope = cast<llvm::DIScope>(debug.getScope());
-    //       std::string filepath = scope->getDirectory().str();
-    //       std::string filename = scope->getFilename().str();
-    //       std::string number = std::to_string(debug.getLine());
-    //       std::string full = filepath+"/"+filename+":"+number;
-    //       char buffer[0x200];
-    //       memset(buffer, 0, sizeof(buffer));
-    //       for(int i=0;i<ipEntry->size;i++){
-    //         sprintf(buffer, "%s:%d\0", ipEntry->line[i].path,ipEntry->line[i].number);
-    //         if(!strcmp(buffer, full.c_str())){
-    //           flag = flag | TAG_IP;
-    //           goto fuck;
-    //         }
-    //       }
-    //       // errs() << full << "\n";
-    //     }
-    //   }
-    // }
-fuck:
+    if(!InterestingLines.empty()){
+      for(auto &Inst: BB){
+        auto debug = Inst.getDebugLoc();
+        if(debug){
+          auto it = std::find(InterestingLines.begin(), InterestingLines.end(), debug.getLine());
+          if (it != InterestingLines.end()){
+            flag = flag | TAG_INTERESTING;
+            break;
+          }
+        }
+      }
+    }
     IRB.CreateCall(SanCovTracePC, ConstantInt::get(Int32Ty, flag))
       ->setCannotMerge(); // gets the PC using GET_CALLER_PC.
   }
