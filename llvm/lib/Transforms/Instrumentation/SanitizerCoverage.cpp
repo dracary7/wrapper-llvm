@@ -542,9 +542,22 @@ static bool isFullPostDominator(const BasicBlock *BB,
 }
 
 static bool shouldInstrumentBlock(const Function &F, const BasicBlock *BB,
+                                  const std::vector<int> &InterestingLines,
                                   const DominatorTree *DT,
                                   const PostDominatorTree *PDT,
                                   const SanitizerCoverageOptions &Options) {
+  // FIXME: should instrument if the InterestingPoint hit this block
+  // whatever
+  if(!InterestingLines.empty()){
+    for(auto Inst = BB->begin(), E = BB->end(); Inst != E; ++Inst){
+      auto debug = Inst->getDebugLoc();
+      if(debug){
+        auto it = std::find(InterestingLines.begin(), InterestingLines.end(), debug.getLine());
+        if (it != InterestingLines.end())
+          return true;
+      }
+    }
+  }
   // Don't insert coverage for blocks containing nothing but unreachable: we
   // will never call __sanitizer_cov() for them, so counting them in
   // NumberOfInstrumentedBlocks() might complicate calculation of code coverage
@@ -649,7 +662,7 @@ void ModuleSanitizerCoverage::instrumentFunction(
   bool IsLeafFunc = true;
 
   for (auto &BB : F) {
-    if (shouldInstrumentBlock(F, &BB, DT, PDT, Options))
+    if (shouldInstrumentBlock(F, &BB, InterestingLines, DT, PDT, Options))
       BlocksToInstrument.push_back(&BB);
     for (auto &Inst : BB) {
       if (Options.IndirectCalls) {
@@ -983,6 +996,9 @@ void ModuleSanitizerCoverage::InjectCoverageAtBlock(Function &F, BasicBlock &BB,
         if(debug){
           auto it = std::find(InterestingLines.begin(), InterestingLines.end(), debug.getLine());
           if (it != InterestingLines.end()){
+            auto *scope = cast<llvm::DIScope>(debug.getScope());
+            std::string filename = scope->getFilename().str();
+            outs() << "InterestingPoint HIT" << filename << ":" << it <<"\n";
             flag = flag | TAG_INTERESTING;
             break;
           }
