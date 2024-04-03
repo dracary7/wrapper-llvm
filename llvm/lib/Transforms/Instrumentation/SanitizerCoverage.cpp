@@ -998,7 +998,7 @@ void ModuleSanitizerCoverage::InjectCoverageAtBlock(Function &F, BasicBlock &BB,
           if (it != InterestingLines.end()){
             auto *scope = cast<llvm::DIScope>(debug.getScope());
             std::string filename = scope->getFilename().str();
-            outs() << "InterestingPoint HIT" << filename << ":" << it <<"\n";
+            outs() << "InterestingPoint HIT:" << filename << ":" << it <<"\n";
             flag = flag | TAG_INTERESTING;
             break;
           }
