@@ -482,13 +482,17 @@ bool ModuleSanitizerCoverage::instrumentModule(
     SanCovLowestStack->setInitializer(Constant::getAllOnesValue(IntptrTy));
 
   SanCovTracePC =
-      M.getOrInsertFunction(SanCovTracePCName, VoidTy, Int32Ty);
+      M.getOrInsertFunction(SanCovTracePCName, VoidTy);
   SanCovTracePCGuard =
       M.getOrInsertFunction(SanCovTracePCGuardName, VoidTy, Int32PtrTy);
 
   std::string SourceFileName = M.getSourceFileName();
   std::vector<int> InterestingLines;
   InterestingLines = InterestingPoints.lookup(SourceFileName);
+  // HACK: for accelerate avoid unnecessary instrument waste time
+  if (InterestingLines.empty()){
+    return true;
+  }
 
   for (auto &F : M)
     instrumentFunction(F, DTCallback, PDTCallback, InterestingLines);
@@ -547,7 +551,6 @@ static bool shouldInstrumentBlock(const Function &F, const BasicBlock *BB,
                                   const PostDominatorTree *PDT,
                                   const SanitizerCoverageOptions &Options) {
   // FIXME: should instrument if the InterestingPoint hit this block
-  // whatever
   if(!InterestingLines.empty()){
     for(auto Inst = BB->begin(), E = BB->end(); Inst != E; ++Inst){
       auto debug = Inst->getDebugLoc();
@@ -960,10 +963,11 @@ void ModuleSanitizerCoverage::InjectTraceForCmp(
 }
 
 // TODO: design mistakes need to rebuild
-#define TAG_NORMAL 0xffffffff
-#define TAG_RETURN 0x0
-#define TAG_HEADER 0x1
-#define TAG_INTERESTING 0x2
+// NOTHING AT ALL
+// #define TAG_NORMAL 0xffffffff
+// #define TAG_RETURN 0x0
+// #define TAG_HEADER 0x1
+// #define TAG_INTERESTING 0x2
 
 void ModuleSanitizerCoverage::InjectCoverageAtBlock(Function &F, BasicBlock &BB,
                                                     size_t Idx,
@@ -987,26 +991,25 @@ void ModuleSanitizerCoverage::InjectCoverageAtBlock(Function &F, BasicBlock &BB,
   if (EntryLoc)
     IRB.SetCurrentDebugLocation(EntryLoc);
   if (Options.TracePC) {
-    int flag = 0;
-    if(IsEntryBB)
-      flag = flag | TAG_HEADER;
-    if(!InterestingLines.empty()){
-      for(auto &Inst: BB){
-        auto debug = Inst.getDebugLoc();
-        if(debug){
-          auto it = std::find(InterestingLines.begin(), InterestingLines.end(), debug.getLine());
-          if (it != InterestingLines.end()){
-            auto *scope = cast<llvm::DIScope>(debug.getScope());
-            std::string filename = scope->getFilename().str();
-            outs() << "InterestingPoint HIT:" << filename << ":" << it <<"\n";
-            flag = flag | TAG_INTERESTING;
-            break;
-          }
+    // int flag = 0;
+    // if(IsEntryBB)
+    //   flag = flag | TAG_HEADER;
+    for(auto &Inst: BB){
+      auto debug = Inst.getDebugLoc();
+      // HACK: add debug.getLine!=0 to filter non-debug inst
+      if(debug && debug.getLine() != 0){
+        auto it = std::find(InterestingLines.begin(), InterestingLines.end(), debug.getLine());
+        if (it != InterestingLines.end()){
+          auto *scope = cast<llvm::DIScope>(debug.getScope());
+          std::string filename = scope->getFilename().str();
+          // outs() << "InterestingPoint HIT:" << filename << ":" << it <<"\n";
+          // flag = flag | TAG_INTERESTING;
+          IRB.CreateCall(SanCovTracePC)->setCannotMerge(); // gets the PC using GET_CALLER_PC.
+          // for just on BB, it's okay
+          break;
         }
       }
     }
-    IRB.CreateCall(SanCovTracePC, ConstantInt::get(Int32Ty, flag))
-      ->setCannotMerge(); // gets the PC using GET_CALLER_PC.
   }
   if (Options.TracePCGuard) {
     auto GuardPtr = IRB.CreateIntToPtr(

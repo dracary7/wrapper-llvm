@@ -624,15 +624,15 @@ static OptimizationLevel mapToLevel(const CodeGenOptions &Opts) {
 }
 
 static bool readInterestingPoints(llvm::StringMap<std::vector<int>> &InterestingPoints){
-  const char *ipsFile = std::getenv("IPS_FILE");
-  if(ipsFile == nullptr){
-    errs() << "IPS_FILE environment not set.\n";
+  const char *traceFile = std::getenv("TRACE_FILE");
+  if(traceFile == nullptr){
+    errs() << "TRACE_FILE environment not set.\n";
     return false;
   }
 
-  std::ifstream fp(ipsFile);
+  std::ifstream fp(traceFile);
   if(!fp.is_open()){
-    errs() << "Failed to open " << ipsFile << "\n";
+    errs() << "Failed to open " << traceFile << "\n";
     return false;
   }
 
